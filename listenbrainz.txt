@@ -1,0 +1,169 @@
+// ==PREPROCESSOR==
+// @name "WSH Listenbrainz"
+// @author "marc2003"
+// ==/PREPROCESSOR==
+
+//get your token from http://listenbrainz.org/user/import
+var token = "";
+//if true, outputs submission data to the foobar2000 console
+var show_data = false;
+//if true, all plays will be logged to file(s) inside your foobar2000 profile
+//or main foobar folder if using portable mode
+//%appdata%\foobar2000\listenbrainz\MM.YYYY.json
+//d:\apps\foobar2000\listenbrainz\MM.YYYY.json
+var log_data = true;
+//////////////////////////////////////////////////////////////////////////////////
+var xmlhttp = new ActiveXObject("Microsoft.XMLHTTP");
+var time_elapsed = 0;
+var target_time = 0;
+var timestamp = 0;
+
+if (log_data) {
+	var fso = new ActiveXObject("Scripting.FileSystemObject");
+	var folder = fb.ProfilePath + "listenbrainz\\";
+	if (!fso.FolderExists(folder))
+		fso.CreateFolder(folder);
+}
+
+function on_paint(gr) {
+	gr.FillSolidRect(0, 0, window.Width, window.Height, utils.GetSysColor(15));
+}
+
+function on_playback_new_track() {
+	time_elapsed = 0;
+	//this determines how much of the track must be played before it counts
+	//currently doing it the last.fm way...
+	target_time = Math.min(Math.ceil(fb.PlaybackLength / 2), 240);
+}
+
+function on_playback_time() {
+	time_elapsed++;
+	if (time_elapsed == target_time)
+		listen();
+}
+
+function listen() {
+	var metadb = fb.GetNowPlaying();
+	if (!metadb)
+		return;
+	var timestamp = Math.floor(new Date().getTime() / 1000);
+	var artist = tf("%artist%", metadb);
+	var track = tf("%title%", metadb);
+	var release_name = tf("[%album%]", metadb);
+	//the server expects artist and track as a bare minimum
+	if (artist == "" || artist == "?" || track == "" || track == "?")
+		return;
+	
+	var data = {
+		listen_type : "single",
+		payload : [{
+			track_metadata : {
+				track_name : track,
+				artist_name : artist,
+				//the following are configured to be empty strings if the tags aren't found. they will be removed by the stringify replacer.
+				release_name : release_name,
+				additional_info : {
+					artist_mbids : get_artist_mbids(metadb),
+					release_mbid : get_id("$if3($meta(MUSICBRAINZ_ALBUMID),$meta(MUSICBRAINZ ALBUM ID),))", metadb),
+					recording_mbid : get_id("$if3($meta(MUSICBRAINZ_TRACKID),$meta(MUSICBRAINZ TRACK ID),)", metadb),
+					track_number : tf("[%tracknumber%]", metadb)
+				}
+			},
+			listened_at : timestamp
+		}]
+	};
+	
+	fb.trace("WSH Listenbrainz: Submitting '" + artist + " - " + track + "'");
+	
+	if (show_data) {
+		//spam the console!
+		fb.trace("WSH Listenbrainz: This is the post data being sent...");
+		fb.trace(JSON.stringify(data, replacer, "    "));
+	}
+	
+	if (log_data)
+		log(data);
+	
+	post(data);
+}
+
+function log(data) {
+	var d = new Date();
+	var f = folder + pad(d.getMonth() + 1) + "." + d.getFullYear() + ".json";
+	if (fso.FileExists(f)) {
+		var json = json_parse(utils.ReadTextFile(f));
+	} else {
+		var json = {
+			listen_type : "import",
+			payload : []
+		}
+	}
+	json.payload.unshift(data.payload[0]);
+	save(JSON.stringify(json, replacer), f);
+}
+
+function post(data) {
+	xmlhttp.open("POST", "http://api.listenbrainz.org/1/submit-listens", true);
+	xmlhttp.setRequestHeader("Content-type", "application/json;charset=UTF-8");
+	xmlhttp.setRequestHeader("Authorization" , "Token " + token);
+	xmlhttp.send(JSON.stringify(data, replacer));
+	xmlhttp.onreadystatechange = function () {
+		if (xmlhttp.readyState == 4) {
+			fb.trace("WSH Listenbrainz: HTTP status: " + xmlhttp.status);
+			xmlhttp.responsetext && fb.trace("WSH Listenbrainz: " + xmlhttp.responsetext);
+		}
+	}
+}
+
+function replacer(key, value) {
+	return value || undefined;
+}
+
+function get_artist_mbids(metadb) {
+	var mbids = tag_to_array("MUSICBRAINZ_ARTISTID", metadb);
+	if (mbids.length > 0)
+		return mbids;
+	mbids = tag_to_array("MUSICBRAINZ ARTIST ID", metadb);
+	return mbids.length > 0 ? mbids : "";
+}
+
+function tag_to_array(tag, metadb) {
+	var arr = [];
+	var count = tf("$meta_num(" + tag + ")", metadb);
+	for (var i = 0; i < count; i++) {
+		arr.push(tf("$meta(" + tag + "," + i + ")", metadb));
+	}
+	return arr;
+}
+
+function get_id(tag, metadb) {
+	var id = tf(tag, metadb);
+	return id.length == 36 ? id : "";
+}
+
+function tf(t, m) {
+	return fb.TitleFormat(t).EvalWithMetadb(m);
+}
+
+function pad(num) {
+	return num < 10 ? "0" + num : num;
+}
+
+function json_parse(text) {
+	try {
+		return JSON.parse(text);
+	} catch(e) {
+		return [];
+	}
+}
+
+function save(text, file) {
+	try {
+		var ts = fso.OpenTextFile(file, 2, true, 0);
+		ts.WriteLine(text);
+		ts.Close();
+		return true;
+	} catch (e) {
+		return false;
+	}
+}
